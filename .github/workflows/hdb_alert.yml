@@ -27,14 +27,14 @@ jobs:
       - name: Install dependencies
         run: pip install requests
 
-      # ── 4. Restore cached state (COMMENTED OUT TEMPORARILY FOR TESTING) ─
-      # - name: Restore state cache
-      #   uses: actions/cache@v4
-      #   with:
-      #     path: last_seen.json
-      #     key: hdb-state-${{ runner.os }}
-      #     restore-keys: |
-      #       hdb-state-
+      # ── 4. Restore cached state (tracks which IDs we've already seen) ─
+      - name: Restore state cache
+        uses: actions/cache@v4
+        with:
+          path: last_seen.json
+          key: hdb-state-${{ runner.os }}
+          restore-keys: |
+            hdb-state-
 
       # ── 5. Run the alert script ───────────────────────────────────────
       - name: Run HDB alert check
@@ -42,7 +42,7 @@ jobs:
           HDB_STREET_NAME:            ${{ vars.HDB_STREET_NAME }}
           HDB_FLAT_TYPE:              ${{ vars.HDB_FLAT_TYPE }}
           HDB_TOWN:                   ${{ vars.HDB_TOWN }}
-          HDB_RESALE_REGISTRATION_DATE: ${{ vars.HDB_RESALE_REGISTRATION_DATE }}
+          RESALE_REGISTRATION_MONTHS: ${{ vars.RESALE_REGISTRATION_MONTHS }}
           GMAIL_ADDRESS:              ${{ secrets.GMAIL_ADDRESS }}
           GMAIL_APP_PASSWORD:         ${{ secrets.GMAIL_APP_PASSWORD }}
           ALERT_TO_EMAIL:             ${{ secrets.ALERT_TO_EMAIL }}
