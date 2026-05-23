@@ -1,0 +1,57 @@
+name: HDB Resale Alert
+
+on:
+  schedule:
+    # Runs every day at 9:00 AM Singapore time (SGT = UTC+8 → 01:00 UTC)
+    - cron: "0 1 * * *"
+
+  # Allow manual trigger from the GitHub Actions tab
+  workflow_dispatch:
+
+jobs:
+  check-transactions:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout your repo ──────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Set up Python ──────────────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # ── 3. Install dependencies ───────────────────────────────────────
+      - name: Install dependencies
+        run: pip install requests
+
+      # ── 4. Restore cached state (tracks which IDs we've already seen) ─
+      - name: Restore state cache
+        uses: actions/cache@v4
+        with:
+          path: last_seen.json
+          key: hdb-state-${{ runner.os }}
+          restore-keys: |
+            hdb-state-
+
+      # ── 5. Run the alert script ───────────────────────────────────────
+      - name: Run HDB alert check
+        env:
+          HDB_STREET_NAME:            ${{ vars.HDB_STREET_NAME }}
+          HDB_FLAT_TYPE:              ${{ vars.HDB_FLAT_TYPE }}
+          HDB_TOWN:                   ${{ vars.HDB_TOWN }}
+          RESALE_REGISTRATION_MONTHS: ${{ vars.RESALE_REGISTRATION_MONTHS }}
+          GMAIL_ADDRESS:              ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD:         ${{ secrets.GMAIL_APP_PASSWORD }}
+          ALERT_TO_EMAIL:             ${{ secrets.ALERT_TO_EMAIL }}
+        run: python hdb_alert.py
+
+      # ── 6. Save updated state so the next run knows what it already saw ─
+      - name: Save updated state cache
+        if: always()
+        uses: actions/cache@v4
+        with:
+          path: last_seen.json
+          key: hdb-state-${{ runner.os }}-${{ github.run_id }}
