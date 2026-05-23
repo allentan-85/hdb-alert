@@ -27,7 +27,7 @@ TO_EMAIL              = os.getenv("ALERT_TO_EMAIL", FROM_EMAIL)
 STATE_FILE            = os.getenv("STATE_FILE", "last_seen.json")
 
 # data.gov.sg resource ID for HDB resale flat prices
-RESOURCE_ID   = "d_8b84cceee58e3ca073d0c7c541307677"
+RESOURCE_ID   = "d_8b84c4ee58e3cfc0ece0d773c8ca6abc"
 API_BASE      = "https://data.gov.sg/api/action/datastore_search"
 # ─────────────────────────────────────────────
 # HELPERS
