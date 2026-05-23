@@ -4,7 +4,7 @@ HDB Resale Transaction Alert
 Monitors data.gov.sg for new HDB resale transactions registered in the last 6 months
 and sends an email alert when new entries are found.
 Filters: Only shows leases that commenced from 2022 onwards.
-Sorting: Latest transactions first.
+Sorting: Latest transactions first, with most recent within same month on top.
 """
 
 import requests
@@ -75,8 +75,15 @@ def fetch_transactions(limit: int = 100) -> list[dict]:
         and int(r.get("lease_commence_date", "0")) >= MIN_LEASE_YEAR
     ]
     
-    # Sort by month descending (latest first)
-    filtered = sorted(filtered, key=lambda x: x.get("month", ""), reverse=True)
+    # Sort by:
+    # 1. Month descending (latest month first)
+    # 2. Within same month, sort by _id descending (most recent first)
+    # _id is typically the record ID that indicates insertion order
+    filtered = sorted(
+        filtered, 
+        key=lambda x: (x.get("month", ""), x.get("_id", 0)),
+        reverse=True
+    )
     
     return filtered
 
@@ -126,8 +133,12 @@ def build_email_body(new_txns: list[dict]) -> tuple[str, str, str]:
         "─" * 70,
     ]
     
-    # Sort by month descending (latest first) in email too
-    sorted_txns = sorted(new_txns, key=lambda x: x.get("month", ""), reverse=True)
+    # Sort by month descending, then by _id descending (latest first)
+    sorted_txns = sorted(
+        new_txns,
+        key=lambda x: (x.get("month", ""), x.get("_id", 0)),
+        reverse=True
+    )
     
     for t in sorted_txns:
         lines += [
@@ -141,7 +152,7 @@ def build_email_body(new_txns: list[dict]) -> tuple[str, str, str]:
         ]
     plain = "\n".join(lines)
 
-    # HTML - sorted latest first
+    # HTML - sorted latest first (month first, then _id)
     rows = ""
     for t in sorted_txns:
         rows += f"""
