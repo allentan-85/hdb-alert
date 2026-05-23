@@ -3,6 +3,8 @@
 HDB Resale Transaction Alert
 Monitors data.gov.sg for new HDB resale transactions registered in the last 6 months
 and sends an email alert when new entries are found.
+Filters: Only shows leases that commenced from 2022 onwards.
+Sorting: Latest transactions first.
 """
 
 import requests
@@ -21,6 +23,7 @@ STREET_NAME           = os.getenv("HDB_STREET_NAME", "BEDOK SOUTH RD")
 FLAT_TYPE             = os.getenv("HDB_FLAT_TYPE", "4 ROOM")
 HDB_TOWN              = os.getenv("HDB_TOWN", "BEDOK")
 MONTHS_BACK           = int(os.getenv("RESALE_REGISTRATION_MONTHS", "6"))  # Last 6 months
+MIN_LEASE_YEAR        = int(os.getenv("MIN_LEASE_YEAR", "2022"))  # Only leases from 2022+
 FROM_EMAIL            = os.getenv("GMAIL_ADDRESS", "")        # your Gmail address
 APP_PASSWORD          = os.getenv("GMAIL_APP_PASSWORD", "")   # Gmail App Password
 TO_EMAIL              = os.getenv("ALERT_TO_EMAIL", FROM_EMAIL)
@@ -42,7 +45,7 @@ def get_cutoff_date() -> str:
     return cutoff.strftime("%Y-%m")
 
 
-def fetch_transactions(limit: int = 50) -> list[dict]:
+def fetch_transactions(limit: int = 100) -> list[dict]:
     """Fetch latest transactions matching the configured criteria."""
     cutoff_month = get_cutoff_date()
     
@@ -62,9 +65,18 @@ def fetch_transactions(limit: int = 50) -> list[dict]:
     if not data.get("success"):
         raise RuntimeError(f"API returned failure: {data}")
     
-    # Filter to only transactions from the last N months
+    # Filter transactions:
+    # 1. Only from the last N months
+    # 2. Only leases that commenced from MIN_LEASE_YEAR onwards
     records = data["result"]["records"]
-    filtered = [r for r in records if r.get("month", "") >= cutoff_month]
+    filtered = [
+        r for r in records 
+        if r.get("month", "") >= cutoff_month
+        and int(r.get("lease_commence_date", "0")) >= MIN_LEASE_YEAR
+    ]
+    
+    # Sort by month descending (latest first)
+    filtered = sorted(filtered, key=lambda x: x.get("month", ""), reverse=True)
     
     return filtered
 
@@ -108,11 +120,16 @@ def build_email_body(new_txns: list[dict]) -> tuple[str, str, str]:
         f"Town            : {HDB_TOWN}",
         f"Street          : {STREET_NAME}",
         f"Flat type       : {FLAT_TYPE}",
+        f"Lease from year : {MIN_LEASE_YEAR}+",
         f"Registration    : Last {MONTHS_BACK} months (from {cutoff_month})",
         f"Checked         : {datetime.now().strftime('%d %b %Y %H:%M')}\n",
         "─" * 70,
     ]
-    for t in new_txns:
+    
+    # Sort by month descending (latest first) in email too
+    sorted_txns = sorted(new_txns, key=lambda x: x.get("month", ""), reverse=True)
+    
+    for t in sorted_txns:
         lines += [
             f"Month      : {t.get('month', 'N/A')}",
             f"Block      : {t.get('block', 'N/A')} {STREET_NAME}",
@@ -124,12 +141,12 @@ def build_email_body(new_txns: list[dict]) -> tuple[str, str, str]:
         ]
     plain = "\n".join(lines)
 
-    # HTML
+    # HTML - sorted latest first
     rows = ""
-    for t in new_txns:
+    for t in sorted_txns:
         rows += f"""
         <tr>
-          <td>{t.get('month', '')}</td>
+          <td><strong>{t.get('month', '')}</strong></td>
           <td>Blk {t.get('block', '')} {STREET_NAME}</td>
           <td>{t.get('storey_range', '')}</td>
           <td>{t.get('floor_area_sqm', '')} sqm</td>
@@ -144,6 +161,7 @@ def build_email_body(new_txns: list[dict]) -> tuple[str, str, str]:
         <strong>Town:</strong> {HDB_TOWN} &nbsp;|&nbsp;
         <strong>Street:</strong> {STREET_NAME} &nbsp;|&nbsp;
         <strong>Type:</strong> {FLAT_TYPE} &nbsp;|&nbsp;
+        <strong>Lease from:</strong> {MIN_LEASE_YEAR}+ &nbsp;|&nbsp;
         <strong>Registered:</strong> Last {MONTHS_BACK} months &nbsp;|&nbsp;
         <strong>Checked:</strong> {datetime.now().strftime('%d %b %Y %H:%M')}
       </p>
@@ -151,7 +169,7 @@ def build_email_body(new_txns: list[dict]) -> tuple[str, str, str]:
              style="border-collapse:collapse;width:100%;font-size:14px;">
         <thead style="background:#2c3e50;color:white;">
           <tr>
-            <th>Month</th><th>Block</th><th>Storey</th>
+            <th>Month ↓ (Latest)</th><th>Block</th><th>Storey</th>
             <th>Area</th><th>Lease Start</th><th>Resale Price</th>
           </tr>
         </thead>
@@ -197,6 +215,7 @@ def main() -> None:
     print(f"  Town    : {HDB_TOWN}")
     print(f"  Street  : {STREET_NAME}")
     print(f"  Flat    : {FLAT_TYPE}")
+    print(f"  Lease   : {MIN_LEASE_YEAR}+")
     print(f"  Reg     : Last {MONTHS_BACK} months (from {cutoff_month})")
 
     try:
