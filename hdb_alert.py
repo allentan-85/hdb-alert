@@ -17,10 +17,10 @@ from datetime import datetime, timedelta
 # ─────────────────────────────────────────────
 # CONFIGURATION — edit these or set as env vars
 # ─────────────────────────────────────────────
-STREET_NAME           = os.getenv("HDB_STREET_NAME", "BEDOK SOUTH RD")
+STREET_NAME           = os.getenv("HDB_STREET_NAME", "BEDOK STH RD")
 FLAT_TYPE             = os.getenv("HDB_FLAT_TYPE", "4 ROOM")
 HDB_TOWN              = os.getenv("HDB_TOWN", "BEDOK")
-MONTHS_BACK           = int(os.getenv("RESALE_REGISTRATION_MONTHS", "6"))  # Last 6 months
+MONTHS_BACK           = int(os.getenv("HDB_RESALE_REGISTRATION_DATE", "LAST 6 MONTHS"))  # Last 6 months
 FROM_EMAIL            = os.getenv("GMAIL_ADDRESS", "")        # your Gmail address
 APP_PASSWORD          = os.getenv("GMAIL_APP_PASSWORD", "")   # Gmail App Password
 TO_EMAIL              = os.getenv("ALERT_TO_EMAIL", FROM_EMAIL)
