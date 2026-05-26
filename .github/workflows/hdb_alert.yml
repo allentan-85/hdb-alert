@@ -16,6 +16,8 @@ jobs:
       # ── 1. Checkout your repo ──────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
       # ── 2. Set up Python ──────────────────────────────────────────────
       - name: Set up Python 3.11
@@ -27,16 +29,27 @@ jobs:
       - name: Install dependencies
         run: pip install requests
 
-      # ── 4. Restore cached state (tracks which IDs we've already seen) ─
+      # ── 4. Create state directory ──────────────────────────────────────
+      - name: Create state directory
+        run: mkdir -p ${{ runner.temp }}/hdb-state
+
+      # ── 5. Restore cached state (tracks which IDs we've already seen) ─
       - name: Restore state cache
         uses: actions/cache@v4
         with:
-          path: last_seen.json
-          key: hdb-state-${{ runner.os }}
+          path: ${{ runner.temp }}/hdb-state/last_seen.json
+          key: hdb-state-${{ runner.os }}-${{ github.repository }}
           restore-keys: |
-            hdb-state-
+            hdb-state-${{ runner.os }}-
 
-      # ── 5. Run the alert script ───────────────────────────────────────
+      # ── 6. Copy state file to working directory ───────────────────────
+      - name: Setup state file
+        run: |
+          if [ -f "${{ runner.temp }}/hdb-state/last_seen.json" ]; then
+            cp "${{ runner.temp }}/hdb-state/last_seen.json" ./last_seen.json
+          fi
+
+      # ── 7. Run the alert script ───────────────────────────────────────
       - name: Run HDB alert check
         env:
           HDB_STREET_NAME:            ${{ vars.HDB_STREET_NAME }}
@@ -48,10 +61,19 @@ jobs:
           ALERT_TO_EMAIL:             ${{ secrets.ALERT_TO_EMAIL }}
         run: python hdb_alert.py
 
-      # ── 6. Save updated state so the next run knows what it already saw ─
+      # ── 8. Copy state file back to cache location ─────────────────────
+      - name: Save state file
+        if: always()
+        run: |
+          mkdir -p "${{ runner.temp }}/hdb-state"
+          if [ -f "./last_seen.json" ]; then
+            cp "./last_seen.json" "${{ runner.temp }}/hdb-state/last_seen.json"
+          fi
+
+      # ── 9. Save updated state so the next run knows what it already saw ─
       - name: Save updated state cache
         if: always()
         uses: actions/cache@v4
         with:
-          path: last_seen.json
-          key: hdb-state-${{ runner.os }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/hdb-state/last_seen.json
+          key: hdb-state-${{ runner.os }}-${{ github.repository }}-${{ github.run_id }}
