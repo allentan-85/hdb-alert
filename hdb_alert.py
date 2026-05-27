@@ -3,8 +3,9 @@
 HDB Resale Transaction Alert
 Monitors data.gov.sg for new HDB resale transactions registered in the last 6 months
 and sends an email alert when new entries are found.
-Filters: Only shows leases that commenced from 2022 onwards.
-Sorting: Latest transactions first, with most recent within same month on top.
+Filters : Only shows leases that commenced from MIN_LEASE_YEAR onwards.
+Sorting : Latest month first. Within same month, highest _id (most recently registered) on top.
+Schedule: Runs every 12 hours.
 """
 
 import requests
@@ -19,17 +20,16 @@ from datetime import datetime, timedelta
 # ─────────────────────────────────────────────
 # CONFIGURATION — edit these or set as env vars
 # ─────────────────────────────────────────────
-STREET_NAME           = os.getenv("HDB_STREET_NAME", "BEDOK SOUTH RD")
-FLAT_TYPE             = os.getenv("HDB_FLAT_TYPE", "4 ROOM")
-HDB_TOWN              = os.getenv("HDB_TOWN", "BEDOK")
-MONTHS_BACK           = int(os.getenv("RESALE_REGISTRATION_MONTHS", "6"))  # Last 6 months
-MIN_LEASE_YEAR        = int(os.getenv("MIN_LEASE_YEAR", "2022"))  # Only leases from 2022+
-FROM_EMAIL            = os.getenv("GMAIL_ADDRESS", "")        # your Gmail address
-APP_PASSWORD          = os.getenv("GMAIL_APP_PASSWORD", "")   # Gmail App Password
-TO_EMAIL              = os.getenv("ALERT_TO_EMAIL", FROM_EMAIL)
-STATE_FILE            = os.getenv("STATE_FILE", "last_seen.json")
+STREET_NAME   = os.getenv("HDB_STREET_NAME", "BEDOK SOUTH RD")
+FLAT_TYPE     = os.getenv("HDB_FLAT_TYPE", "4 ROOM")
+HDB_TOWN      = os.getenv("HDB_TOWN", "BEDOK")
+MONTHS_BACK   = int(os.getenv("RESALE_REGISTRATION_MONTHS", "6"))
+MIN_LEASE_YEAR= int(os.getenv("MIN_LEASE_YEAR", "2022"))
+FROM_EMAIL    = os.getenv("GMAIL_ADDRESS", "")
+APP_PASSWORD  = os.getenv("GMAIL_APP_PASSWORD", "")
+TO_EMAIL      = os.getenv("ALERT_TO_EMAIL", FROM_EMAIL)
+STATE_FILE    = os.getenv("STATE_FILE", "last_seen.json")
 
-# data.gov.sg resource ID for HDB resale flat prices
 RESOURCE_ID   = "f1765b54-a209-4718-8d38-a39237f502b3"
 API_BASE      = "https://data.gov.sg/api/action/datastore_search"
 
@@ -38,67 +38,93 @@ API_BASE      = "https://data.gov.sg/api/action/datastore_search"
 # ─────────────────────────────────────────────
 
 def get_cutoff_date() -> str:
-    """Calculate the cutoff date for 'last N months' filter.
-    Returns date in YYYY-MM format for API filtering."""
     today = datetime.now()
     cutoff = today - timedelta(days=30 * MONTHS_BACK)
     return cutoff.strftime("%Y-%m")
 
 
-def fetch_transactions(limit: int = 100) -> list[dict]:
-    """Fetch latest transactions matching the configured criteria."""
+def fetch_all_matching(limit: int = 500) -> list[dict]:
+    """
+    Fetch ALL transactions matching street/flat/town.
+    We fetch a large limit so nothing is missed before filtering.
+    Returns records sorted: month DESC, then _id DESC (newest registration first).
+    """
     cutoff_month = get_cutoff_date()
-    
+
     params = {
         "resource_id": RESOURCE_ID,
         "filters": json.dumps({
-            "flat_type": FLAT_TYPE,
+            "flat_type":   FLAT_TYPE,
             "street_name": STREET_NAME,
-            "town": HDB_TOWN,
+            "town":        HDB_TOWN,
         }),
-        "sort": "month desc",
+        "sort":  "_id desc",   # ← Sort by registration ID so newest come first
         "limit": limit,
     }
+
+    print(f"  Fetching from API (limit={limit}, sort=_id desc)...")
     resp = requests.get(API_BASE, params=params, timeout=30)
     resp.raise_for_status()
     data = resp.json()
     if not data.get("success"):
         raise RuntimeError(f"API returned failure: {data}")
-    
-    # Filter transactions:
-    # 1. Only from the last N months
-    # 2. Only leases that commenced from MIN_LEASE_YEAR onwards
+
     records = data["result"]["records"]
-    filtered = [
-        r for r in records 
-        if r.get("month", "") >= cutoff_month
-        and int(r.get("lease_commence_date", "0")) >= MIN_LEASE_YEAR
-    ]
-    
-    # Sort by:
-    # 1. Month descending (latest month first)
-    # 2. Within same month, sort by _id descending (most recent first)
-    # _id is typically the record ID that indicates insertion order
-    filtered = sorted(
-        filtered, 
-        key=lambda x: (x.get("month", ""), x.get("_id", 0)),
+    print(f"  API returned {len(records)} raw records")
+
+    # ── Apply filters ──────────────────────────────────────────────────
+    filtered = []
+    skipped_month = 0
+    skipped_lease = 0
+
+    for r in records:
+        month      = r.get("month", "")
+        lease_year = r.get("lease_commence_date", "0")
+
+        if month < cutoff_month:
+            skipped_month += 1
+            continue
+
+        try:
+            if int(lease_year) < MIN_LEASE_YEAR:
+                skipped_lease += 1
+                continue
+        except (ValueError, TypeError):
+            skipped_lease += 1
+            continue
+
+        filtered.append(r)
+
+    print(f"  Skipped (too old month): {skipped_month}")
+    print(f"  Skipped (lease < {MIN_LEASE_YEAR}): {skipped_lease}")
+    print(f"  After filter: {len(filtered)} records")
+
+    # ── Final sort: month DESC, then _id DESC within same month ────────
+    filtered.sort(
+        key=lambda x: (x.get("month", ""), int(x.get("_id", 0))),
         reverse=True
     )
-    
+
     return filtered
 
 
 def load_state() -> dict:
     if os.path.exists(STATE_FILE):
-        with open(STATE_FILE) as f:
-            return json.load(f)
+        try:
+            with open(STATE_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
     return {"seen_ids": []}
 
 
 def save_state(seen_ids: list) -> None:
     with open(STATE_FILE, "w") as f:
         json.dump(
-            {"seen_ids": seen_ids, "last_checked": datetime.now().isoformat()},
+            {
+                "seen_ids":     seen_ids,
+                "last_checked": datetime.now().isoformat(),
+            },
             f,
             indent=2,
         )
@@ -108,20 +134,19 @@ def format_price(price_str: str) -> str:
     try:
         return f"${int(float(price_str)):,}"
     except (ValueError, TypeError):
-        return price_str
+        return str(price_str)
 
 
 def build_email_body(new_txns: list[dict]) -> tuple[str, str, str]:
-    """Returns (subject, plain_text, html) for the alert email."""
-    count = len(new_txns)
+    count        = len(new_txns)
     cutoff_month = get_cutoff_date()
-    
+
     subject = (
         f"🏠 HDB Alert: {count} new transaction{'s' if count > 1 else ''} — "
         f"{FLAT_TYPE} @ {STREET_NAME}"
     )
 
-    # Plain text
+    # ── Already sorted correctly (month DESC, _id DESC) ────────────────
     lines = [
         f"New HDB Resale Transaction{'s' if count > 1 else ''} Detected\n",
         f"Town            : {HDB_TOWN}",
@@ -132,15 +157,7 @@ def build_email_body(new_txns: list[dict]) -> tuple[str, str, str]:
         f"Checked         : {datetime.now().strftime('%d %b %Y %H:%M')}\n",
         "─" * 70,
     ]
-    
-    # Sort by month descending, then by _id descending (latest first)
-    sorted_txns = sorted(
-        new_txns,
-        key=lambda x: (x.get("month", ""), x.get("_id", 0)),
-        reverse=True
-    )
-    
-    for t in sorted_txns:
+    for t in new_txns:
         lines += [
             f"Month      : {t.get('month', 'N/A')}",
             f"Block      : {t.get('block', 'N/A')} {STREET_NAME}",
@@ -152,9 +169,8 @@ def build_email_body(new_txns: list[dict]) -> tuple[str, str, str]:
         ]
     plain = "\n".join(lines)
 
-    # HTML - sorted latest first (month first, then _id)
     rows = ""
-    for t in sorted_txns:
+    for t in new_txns:
         rows += f"""
         <tr>
           <td><strong>{t.get('month', '')}</strong></td>
@@ -180,8 +196,12 @@ def build_email_body(new_txns: list[dict]) -> tuple[str, str, str]:
              style="border-collapse:collapse;width:100%;font-size:14px;">
         <thead style="background:#2c3e50;color:white;">
           <tr>
-            <th>Month ↓ (Latest)</th><th>Block</th><th>Storey</th>
-            <th>Area</th><th>Lease Start</th><th>Resale Price</th>
+            <th>Month ↓ (Latest)</th>
+            <th>Block</th>
+            <th>Storey</th>
+            <th>Area</th>
+            <th>Lease Start</th>
+            <th>Resale Price</th>
           </tr>
         </thead>
         <tbody>{rows}</tbody>
@@ -197,16 +217,14 @@ def build_email_body(new_txns: list[dict]) -> tuple[str, str, str]:
 
 def send_email(subject: str, plain: str, html: str) -> None:
     if not FROM_EMAIL or not APP_PASSWORD:
-        raise ValueError(
-            "GMAIL_ADDRESS and GMAIL_APP_PASSWORD environment variables must be set."
-        )
+        raise ValueError("GMAIL_ADDRESS and GMAIL_APP_PASSWORD must be set.")
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"]    = FROM_EMAIL
     msg["To"]      = TO_EMAIL
     msg.attach(MIMEText(plain, "plain"))
-    msg.attach(MIMEText(html, "html"))
+    msg.attach(MIMEText(html,  "html"))
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
         smtp.login(FROM_EMAIL, APP_PASSWORD)
@@ -221,26 +239,28 @@ def send_email(subject: str, plain: str, html: str) -> None:
 
 def main() -> None:
     cutoff_month = get_cutoff_date()
-    
     print(f"[{datetime.now().isoformat()}] Checking HDB transactions …")
     print(f"  Town    : {HDB_TOWN}")
     print(f"  Street  : {STREET_NAME}")
     print(f"  Flat    : {FLAT_TYPE}")
     print(f"  Lease   : {MIN_LEASE_YEAR}+")
-    print(f"  Reg     : Last {MONTHS_BACK} months (from {cutoff_month})")
+    print(f"  Cutoff  : {cutoff_month}")
 
     try:
-        txns = fetch_transactions()
+        txns = fetch_all_matching()
     except Exception as e:
         print(f"❌ Failed to fetch data: {e}", file=sys.stderr)
         sys.exit(1)
 
-    print(f"  Fetched : {len(txns)} records from API (after filtering)")
+    print(f"  Total   : {len(txns)} records after filter")
 
+    # ── Load state and detect NEW transactions ─────────────────────────
     state    = load_state()
-    seen_ids = set(state.get("seen_ids", []))
-    new_txns = [t for t in txns if str(t["_id"]) not in seen_ids]
+    seen_ids = set(str(x) for x in state.get("seen_ids", []))
 
+    print(f"  Known   : {len(seen_ids)} previously seen IDs")
+
+    new_txns = [t for t in txns if str(t["_id"]) not in seen_ids]
     print(f"  New     : {len(new_txns)} unseen transaction(s)")
 
     if new_txns:
@@ -253,10 +273,11 @@ def main() -> None:
     else:
         print("  No new transactions — nothing to send.")
 
-    # Save all fetched IDs so we don't re-alert next run
+    # ── Save ALL current IDs as seen (not just new ones) ───────────────
+    # This prevents re-alerting on next run
     all_ids = [str(t["_id"]) for t in txns]
     save_state(all_ids)
-    print("  State saved.")
+    print(f"  Saved   : {len(all_ids)} IDs to state file")
 
 
 if __name__ == "__main__":
