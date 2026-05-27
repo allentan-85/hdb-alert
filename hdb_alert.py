@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 RESOURCE_ID = "d_8b84c4ee58e3cfc0ece0d773c8ca6abc"
 DATASTORE_URL = "https://data.gov.sg/api/action/datastore_search"
 DEFAULT_MAIL_TO = "tyuehlun85@gmail.com"
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 DEFAULT_FILTERS = {
     "town": "BEDOK",
@@ -97,4 +98,3 @@ def fetch_transactions(filters: dict[str, str], start_month: str) -> list[dict[s
         recent,
         key=lambda record: (record.get("month", ""), int(record.get("_id", 0))),
         reverse=True,
-    )
