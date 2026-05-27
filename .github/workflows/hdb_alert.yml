@@ -24,6 +24,11 @@ jobs:
         with:
           python-version: "3.x"
 
+      - name: Verify monitor script exists
+        run: |
+          test -f hdb-resale-alert/monitor.py
+          python -m py_compile hdb-resale-alert/monitor.py
+
       - name: Check HDB resale transactions
         env:
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
@@ -39,8 +44,13 @@ jobs:
 
       - name: Commit alert state
         run: |
+          if git diff --quiet -- hdb-resale-alert/state.json; then
+            echo "No alert state changes to commit."
+            exit 0
+          fi
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add hdb-resale-alert/state.json
-          git diff --staged --quiet || git commit -m "Update HDB resale alert state"
+          git commit -m "Update HDB resale alert state"
           git push
