@@ -1,56 +1,79 @@
-name: HDB Resale Transaction Alert
+name: HDB Resale Alert
 
 on:
   schedule:
-    - cron: "0 */6 * * *"
+    # Runs every day at 9:00 AM Singapore time (SGT = UTC+8 → 01:00 UTC)
+    - cron: "0 1 * * *"
+
+  # Allow manual trigger from the GitHub Actions tab
   workflow_dispatch:
 
-permissions:
-  contents: write
-
-concurrency:
-  group: hdb-resale-alert
-  cancel-in-progress: false
-
 jobs:
-  check-hdb-resale:
+  check-transactions:
     runs-on: ubuntu-latest
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
 
-      - name: Set up Python
+    steps:
+      # ── 1. Checkout your repo ──────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # ── 2. Set up Python ──────────────────────────────────────────────
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
-          python-version: "3.x"
+          python-version: "3.11"
 
-      - name: Verify monitor script exists
+      # ── 3. Install dependencies ───────────────────────────────────────
+      - name: Install dependencies
+        run: pip install requests
+
+      # ── 4. Create state directory ──────────────────────────────────────
+      - name: Create state directory
+        run: mkdir -p ${{ runner.temp }}/hdb-state
+
+      # ── 5. Restore cached state (tracks which IDs we've already seen) ─
+      - name: Restore state cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/hdb-state/last_seen.json
+          key: hdb-state-${{ runner.os }}-${{ github.repository }}
+          restore-keys: |
+            hdb-state-${{ runner.os }}-
+
+      # ── 6. Copy state file to working directory ───────────────────────
+      - name: Setup state file
         run: |
-          test -f hdb-resale-alert/monitor.py
-          python -m py_compile hdb-resale-alert/monitor.py
-
-      - name: Check HDB resale transactions
-        env:
-          SMTP_HOST: ${{ secrets.SMTP_HOST }}
-          SMTP_PORT: ${{ secrets.SMTP_PORT }}
-          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
-          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
-          MAIL_FROM: ${{ secrets.MAIL_FROM }}
-          MAIL_TO: tyuehlun85@gmail.com
-          SMTP_USE_SSL: ${{ secrets.SMTP_USE_SSL }}
-          HDB_ALERT_TIMEZONE: "Asia/Singapore"
-          HDB_ALERT_SEND_ON_FIRST_RUN: "false"
-        run: python hdb-resale-alert/monitor.py
-
-      - name: Commit alert state
-        run: |
-          if git diff --quiet -- hdb-resale-alert/state.json; then
-            echo "No alert state changes to commit."
-            exit 0
+          if [ -f "${{ runner.temp }}/hdb-state/last_seen.json" ]; then
+            cp "${{ runner.temp }}/hdb-state/last_seen.json" ./last_seen.json
           fi
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add hdb-resale-alert/state.json
-          git commit -m "Update HDB resale alert state"
-          git push
+      # ── 7. Run the alert script ───────────────────────────────────────
+      - name: Run HDB alert check
+        env:
+          HDB_STREET_NAME:            ${{ vars.HDB_STREET_NAME }}
+          HDB_FLAT_TYPE:              ${{ vars.HDB_FLAT_TYPE }}
+          HDB_TOWN:                   ${{ vars.HDB_TOWN }}
+          RESALE_REGISTRATION_MONTHS: ${{ vars.RESALE_REGISTRATION_MONTHS }}
+          GMAIL_ADDRESS:              ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD:         ${{ secrets.GMAIL_APP_PASSWORD }}
+          ALERT_TO_EMAIL:             ${{ secrets.ALERT_TO_EMAIL }}
+        run: python hdb_alert.py
+
+      # ── 8. Copy state file back to cache location ─────────────────────
+      - name: Save state file
+        if: always()
+        run: |
+          mkdir -p "${{ runner.temp }}/hdb-state"
+          if [ -f "./last_seen.json" ]; then
+            cp "./last_seen.json" "${{ runner.temp }}/hdb-state/last_seen.json"
+          fi
+
+      # ── 9. Save updated state so the next run knows what it already saw ─
+      - name: Save updated state cache
+        if: always()
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/hdb-state/last_seen.json
+          key: hdb-state-${{ runner.os }}-${{ github.repository }}-${{ github.run_id }}
