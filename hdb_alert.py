@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-HDB Resale Transaction Alert
-Monitors data.gov.sg for new HDB resale transactions registered in the last 6 months
-and sends an email alert when new entries are found.
-Filters : Only shows leases that commenced from MIN_LEASE_YEAR onwards.
-Sorting : Latest month first. Within same month, highest _id (most recently registered) on top.
-Schedule: Runs every 12 hours.
+HDB Resale Transaction Alert v3 — crash-proof edition
+Monitors data.gov.sg for new HDB resale transactions (last N months)
+and sends an email alert only when new entries are found.
+Filters : Lease commenced from MIN_LEASE_YEAR onwards.
+Sorting : Latest month first. Within same month, highest _id first (newest registration).
+Schedule: Every 12 hours (9am and 9pm SGT).
 """
 
 import requests
@@ -17,37 +17,61 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
 
-# ─────────────────────────────────────────────
-# CONFIGURATION — edit these or set as env vars
-# ─────────────────────────────────────────────
-STREET_NAME   = os.getenv("HDB_STREET_NAME", "BEDOK SOUTH RD")
-FLAT_TYPE     = os.getenv("HDB_FLAT_TYPE", "4 ROOM")
-HDB_TOWN      = os.getenv("HDB_TOWN", "BEDOK")
-MONTHS_BACK   = int(os.getenv("RESALE_REGISTRATION_MONTHS", "6"))
-MIN_LEASE_YEAR= int(os.getenv("MIN_LEASE_YEAR", "2022"))
-FROM_EMAIL    = os.getenv("GMAIL_ADDRESS", "")
-APP_PASSWORD  = os.getenv("GMAIL_APP_PASSWORD", "")
-TO_EMAIL      = os.getenv("ALERT_TO_EMAIL", FROM_EMAIL)
-STATE_FILE    = os.getenv("STATE_FILE", "last_seen.json")
 
-RESOURCE_ID   = "f1765b54-a209-4718-8d38-a39237f502b3"
-API_BASE      = "https://data.gov.sg/api/action/datastore_search"
+# ─────────────────────────────────────────────────────────────────────
+# SAFE HELPERS — never crash on empty/missing env vars
+# ─────────────────────────────────────────────────────────────────────
 
-# ─────────────────────────────────────────────
-# HELPERS
-# ─────────────────────────────────────────────
+def safe_int(value: str, default: int) -> int:
+    """Convert string to int safely. Returns default if value is empty or invalid."""
+    try:
+        v = (value or "").strip()
+        return int(v) if v else default
+    except (ValueError, TypeError):
+        return default
+
+
+# ─────────────────────────────────────────────────────────────────────
+# CONFIGURATION — read from GitHub Variables / Secrets
+# ─────────────────────────────────────────────────────────────────────
+
+STREET_NAME    = (os.getenv("HDB_STREET_NAME")    or "BEDOK SOUTH RD").strip()
+FLAT_TYPE      = (os.getenv("HDB_FLAT_TYPE")      or "4 ROOM").strip()
+HDB_TOWN       = (os.getenv("HDB_TOWN")           or "BEDOK").strip()
+MONTHS_BACK    = safe_int(os.getenv("RESALE_REGISTRATION_MONTHS"), 6)
+MIN_LEASE_YEAR = safe_int(os.getenv("MIN_LEASE_YEAR"), 2022)
+FROM_EMAIL     = (os.getenv("GMAIL_ADDRESS")      or "").strip()
+APP_PASSWORD   = (os.getenv("GMAIL_APP_PASSWORD") or "").strip()
+TO_EMAIL       = (os.getenv("ALERT_TO_EMAIL")     or FROM_EMAIL).strip()
+STATE_FILE     = (os.getenv("STATE_FILE")         or "last_seen.json").strip()
+
+RESOURCE_ID    = "f1765b54-a209-4718-8d38-a39237f502b3"
+API_BASE       = "https://data.gov.sg/api/action/datastore_search"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# CORE FUNCTIONS
+# ─────────────────────────────────────────────────────────────────────
 
 def get_cutoff_date() -> str:
-    today = datetime.now()
-    cutoff = today - timedelta(days=30 * MONTHS_BACK)
+    """Return YYYY-MM for 'N months ago' — used to filter old transactions."""
+    cutoff = datetime.now() - timedelta(days=30 * MONTHS_BACK)
     return cutoff.strftime("%Y-%m")
 
 
-def fetch_all_matching(limit: int = 500) -> list[dict]:
+def safe_id(record: dict) -> int:
+    """Extract _id as integer safely for sorting."""
+    try:
+        return int(record.get("_id") or 0)
+    except (ValueError, TypeError):
+        return 0
+
+
+def fetch_all_matching() -> list[dict]:
     """
-    Fetch ALL transactions matching street/flat/town.
-    We fetch a large limit so nothing is missed before filtering.
-    Returns records sorted: month DESC, then _id DESC (newest registration first).
+    Fetch all transactions matching street / flat type / town.
+    Limit=500 ensures we capture everything before filtering.
+    Returns list sorted: month DESC, then _id DESC (newest first within same month).
     """
     cutoff_month = get_cutoff_date()
 
@@ -58,52 +82,39 @@ def fetch_all_matching(limit: int = 500) -> list[dict]:
             "street_name": STREET_NAME,
             "town":        HDB_TOWN,
         }),
-        "sort":  "_id desc",   # ← Sort by registration ID so newest come first
-        "limit": limit,
+        "sort":  "_id desc",
+        "limit": 500,
     }
 
-    print(f"  Fetching from API (limit={limit}, sort=_id desc)...")
+    print(f"  Querying API …")
     resp = requests.get(API_BASE, params=params, timeout=30)
     resp.raise_for_status()
     data = resp.json()
+
     if not data.get("success"):
-        raise RuntimeError(f"API returned failure: {data}")
+        raise RuntimeError(f"API error: {data}")
 
     records = data["result"]["records"]
-    print(f"  API returned {len(records)} raw records")
+    print(f"  Raw records from API  : {len(records)}")
 
-    # ── Apply filters ──────────────────────────────────────────────────
+    # ── Filter ────────────────────────────────────────────────────────
     filtered = []
-    skipped_month = 0
-    skipped_lease = 0
-
     for r in records:
-        month      = r.get("month", "")
-        lease_year = r.get("lease_commence_date", "0")
+        month      = (r.get("month") or "").strip()
+        lease_raw  = (r.get("lease_commence_date") or "0").strip()
+        lease_year = safe_int(lease_raw, 0)
 
         if month < cutoff_month:
-            skipped_month += 1
-            continue
-
-        try:
-            if int(lease_year) < MIN_LEASE_YEAR:
-                skipped_lease += 1
-                continue
-        except (ValueError, TypeError):
-            skipped_lease += 1
-            continue
-
+            continue                    # too old by registration month
+        if lease_year < MIN_LEASE_YEAR:
+            continue                    # lease too old
         filtered.append(r)
 
-    print(f"  Skipped (too old month): {skipped_month}")
-    print(f"  Skipped (lease < {MIN_LEASE_YEAR}): {skipped_lease}")
-    print(f"  After filter: {len(filtered)} records")
+    print(f"  After filter          : {len(filtered)} "
+          f"(month>={cutoff_month}, lease>={MIN_LEASE_YEAR})")
 
-    # ── Final sort: month DESC, then _id DESC within same month ────────
-    filtered.sort(
-        key=lambda x: (x.get("month", ""), int(x.get("_id", 0))),
-        reverse=True
-    )
+    # ── Sort: month DESC, then _id DESC ───────────────────────────────
+    filtered.sort(key=lambda x: (x.get("month", ""), safe_id(x)), reverse=True)
 
     return filtered
 
@@ -113,40 +124,35 @@ def load_state() -> dict:
         try:
             with open(STATE_FILE) as f:
                 return json.load(f)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"  Warning: could not read state file ({e}). Starting fresh.")
     return {"seen_ids": []}
 
 
-def save_state(seen_ids: list) -> None:
+def save_state(all_ids: list) -> None:
     with open(STATE_FILE, "w") as f:
         json.dump(
-            {
-                "seen_ids":     seen_ids,
-                "last_checked": datetime.now().isoformat(),
-            },
-            f,
-            indent=2,
+            {"seen_ids": all_ids, "last_checked": datetime.now().isoformat()},
+            f, indent=2,
         )
 
 
-def format_price(price_str: str) -> str:
+def fmt_price(val) -> str:
     try:
-        return f"${int(float(price_str)):,}"
+        return f"${int(float(val or 0)):,}"
     except (ValueError, TypeError):
-        return str(price_str)
+        return str(val)
 
 
-def build_email_body(new_txns: list[dict]) -> tuple[str, str, str]:
+def build_email(new_txns: list[dict]) -> tuple[str, str, str]:
     count        = len(new_txns)
     cutoff_month = get_cutoff_date()
-
-    subject = (
+    subject      = (
         f"🏠 HDB Alert: {count} new transaction{'s' if count > 1 else ''} — "
         f"{FLAT_TYPE} @ {STREET_NAME}"
     )
 
-    # ── Already sorted correctly (month DESC, _id DESC) ────────────────
+    # Plain text
     lines = [
         f"New HDB Resale Transaction{'s' if count > 1 else ''} Detected\n",
         f"Town            : {HDB_TOWN}",
@@ -164,61 +170,59 @@ def build_email_body(new_txns: list[dict]) -> tuple[str, str, str]:
             f"Storey     : {t.get('storey_range', 'N/A')}",
             f"Floor Area : {t.get('floor_area_sqm', 'N/A')} sqm",
             f"Lease Start: {t.get('lease_commence_date', 'N/A')}",
-            f"Resale $   : {format_price(t.get('resale_price', '0'))}",
+            f"Resale $   : {fmt_price(t.get('resale_price'))}",
             "─" * 70,
         ]
     plain = "\n".join(lines)
 
+    # HTML table rows
     rows = ""
     for t in new_txns:
-        rows += f"""
-        <tr>
-          <td><strong>{t.get('month', '')}</strong></td>
-          <td>Blk {t.get('block', '')} {STREET_NAME}</td>
-          <td>{t.get('storey_range', '')}</td>
-          <td>{t.get('floor_area_sqm', '')} sqm</td>
-          <td>{t.get('lease_commence_date', '')}</td>
-          <td><strong>{format_price(t.get('resale_price', '0'))}</strong></td>
-        </tr>"""
+        rows += (
+            f"<tr>"
+            f"<td><strong>{t.get('month','')}</strong></td>"
+            f"<td>Blk {t.get('block','')} {STREET_NAME}</td>"
+            f"<td>{t.get('storey_range','')}</td>"
+            f"<td>{t.get('floor_area_sqm','')} sqm</td>"
+            f"<td>{t.get('lease_commence_date','')}</td>"
+            f"<td><strong>{fmt_price(t.get('resale_price'))}</strong></td>"
+            f"</tr>"
+        )
 
-    html = f"""
-    <html><body style="font-family:sans-serif;color:#222;">
-      <h2 style="color:#c0392b;">🏠 HDB Resale Alert</h2>
-      <p>
-        <strong>Town:</strong> {HDB_TOWN} &nbsp;|&nbsp;
-        <strong>Street:</strong> {STREET_NAME} &nbsp;|&nbsp;
-        <strong>Type:</strong> {FLAT_TYPE} &nbsp;|&nbsp;
-        <strong>Lease from:</strong> {MIN_LEASE_YEAR}+ &nbsp;|&nbsp;
-        <strong>Registered:</strong> Last {MONTHS_BACK} months &nbsp;|&nbsp;
-        <strong>Checked:</strong> {datetime.now().strftime('%d %b %Y %H:%M')}
-      </p>
-      <table border="1" cellpadding="8" cellspacing="0"
-             style="border-collapse:collapse;width:100%;font-size:14px;">
-        <thead style="background:#2c3e50;color:white;">
-          <tr>
-            <th>Month ↓ (Latest)</th>
-            <th>Block</th>
-            <th>Storey</th>
-            <th>Area</th>
-            <th>Lease Start</th>
-            <th>Resale Price</th>
-          </tr>
-        </thead>
-        <tbody>{rows}</tbody>
-      </table>
-      <p style="font-size:12px;color:#888;margin-top:24px;">
-        Source: <a href="https://data.gov.sg">data.gov.sg</a> HDB Resale Prices dataset.<br>
-        Note: HDB data is updated approximately monthly.
-      </p>
-    </body></html>"""
+    html = f"""<html><body style="font-family:sans-serif;color:#222;">
+<h2 style="color:#c0392b;">🏠 HDB Resale Alert</h2>
+<p>
+  <strong>Town:</strong> {HDB_TOWN} &nbsp;|&nbsp;
+  <strong>Street:</strong> {STREET_NAME} &nbsp;|&nbsp;
+  <strong>Type:</strong> {FLAT_TYPE} &nbsp;|&nbsp;
+  <strong>Lease from:</strong> {MIN_LEASE_YEAR}+ &nbsp;|&nbsp;
+  <strong>Registered:</strong> Last {MONTHS_BACK} months &nbsp;|&nbsp;
+  <strong>Checked:</strong> {datetime.now().strftime('%d %b %Y %H:%M')}
+</p>
+<table border="1" cellpadding="8" cellspacing="0"
+       style="border-collapse:collapse;width:100%;font-size:14px;">
+  <thead style="background:#2c3e50;color:white;">
+    <tr>
+      <th>Month ↓ (Latest)</th><th>Block</th><th>Storey</th>
+      <th>Area</th><th>Lease Start</th><th>Resale Price</th>
+    </tr>
+  </thead>
+  <tbody>{rows}</tbody>
+</table>
+<p style="font-size:12px;color:#888;margin-top:24px;">
+  Source: <a href="https://data.gov.sg">data.gov.sg</a> HDB Resale Prices.<br>
+  Note: HDB data is updated approximately monthly.
+</p>
+</body></html>"""
 
     return subject, plain, html
 
 
 def send_email(subject: str, plain: str, html: str) -> None:
     if not FROM_EMAIL or not APP_PASSWORD:
-        raise ValueError("GMAIL_ADDRESS and GMAIL_APP_PASSWORD must be set.")
-
+        raise ValueError(
+            "GMAIL_ADDRESS and GMAIL_APP_PASSWORD must be set in GitHub Secrets."
+        )
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"]    = FROM_EMAIL
@@ -230,54 +234,60 @@ def send_email(subject: str, plain: str, html: str) -> None:
         smtp.login(FROM_EMAIL, APP_PASSWORD)
         smtp.sendmail(FROM_EMAIL, TO_EMAIL, msg.as_string())
 
-    print(f"✅ Email sent to {TO_EMAIL}")
+    print(f"  ✅ Email sent → {TO_EMAIL}")
 
 
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────
 # MAIN
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    cutoff_month = get_cutoff_date()
-    print(f"[{datetime.now().isoformat()}] Checking HDB transactions …")
-    print(f"  Town    : {HDB_TOWN}")
+    print(f"\n{'='*60}")
+    print(f"[{datetime.now().isoformat()}] HDB Alert check starting")
+    print(f"{'='*60}")
     print(f"  Street  : {STREET_NAME}")
     print(f"  Flat    : {FLAT_TYPE}")
+    print(f"  Town    : {HDB_TOWN}")
     print(f"  Lease   : {MIN_LEASE_YEAR}+")
-    print(f"  Cutoff  : {cutoff_month}")
+    print(f"  Months  : last {MONTHS_BACK} months")
+    print(f"  Cutoff  : {get_cutoff_date()}")
 
+    # ── Fetch ─────────────────────────────────────────────────────────
     try:
         txns = fetch_all_matching()
     except Exception as e:
-        print(f"❌ Failed to fetch data: {e}", file=sys.stderr)
+        print(f"\n❌ Fetch failed: {e}", file=sys.stderr)
         sys.exit(1)
 
-    print(f"  Total   : {len(txns)} records after filter")
+    if not txns:
+        print("  No transactions matched filters.")
+        save_state([])
+        return
 
-    # ── Load state and detect NEW transactions ─────────────────────────
+    # ── Detect new ────────────────────────────────────────────────────
     state    = load_state()
     seen_ids = set(str(x) for x in state.get("seen_ids", []))
+    print(f"  Previously seen IDs : {len(seen_ids)}")
 
-    print(f"  Known   : {len(seen_ids)} previously seen IDs")
+    new_txns = [t for t in txns if str(t.get("_id", "")) not in seen_ids]
+    print(f"  New transactions    : {len(new_txns)}")
 
-    new_txns = [t for t in txns if str(t["_id"]) not in seen_ids]
-    print(f"  New     : {len(new_txns)} unseen transaction(s)")
-
+    # ── Alert ─────────────────────────────────────────────────────────
     if new_txns:
-        subject, plain, html = build_email_body(new_txns)
         try:
+            subject, plain, html = build_email(new_txns)
             send_email(subject, plain, html)
         except Exception as e:
-            print(f"❌ Failed to send email: {e}", file=sys.stderr)
+            print(f"\n❌ Email failed: {e}", file=sys.stderr)
             sys.exit(1)
     else:
-        print("  No new transactions — nothing to send.")
+        print("  No new transactions — email not sent.")
 
-    # ── Save ALL current IDs as seen (not just new ones) ───────────────
-    # This prevents re-alerting on next run
-    all_ids = [str(t["_id"]) for t in txns]
+    # ── Save state ────────────────────────────────────────────────────
+    all_ids = [str(t.get("_id", "")) for t in txns]
     save_state(all_ids)
-    print(f"  Saved   : {len(all_ids)} IDs to state file")
+    print(f"  State saved         : {len(all_ids)} IDs")
+    print(f"{'='*60}\n")
 
 
 if __name__ == "__main__":
