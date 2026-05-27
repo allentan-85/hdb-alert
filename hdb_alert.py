@@ -4,7 +4,7 @@ HDB Resale Transaction Alert
 Monitors data.gov.sg for new HDB resale transactions registered in the last 6 months
 and sends an email alert when new entries are found.
 Filters: Only shows leases that commenced from 2022 onwards.
-Sorting: Latest transactions first, with most recent within same month on top.
+Sorting: Latest transactions first, with highest price within same month on top.
 """
 
 import requests
@@ -45,8 +45,9 @@ def get_cutoff_date() -> str:
     return cutoff.strftime("%Y-%m")
 
 
-def fetch_transactions(limit: int = 100) -> list[dict]:
-    """Fetch latest transactions matching the configured criteria."""
+def fetch_transactions(limit: int = 500) -> list[dict]:
+    """Fetch latest transactions matching the configured criteria.
+    Increased limit to 500 to ensure we get all transactions after filtering."""
     cutoff_month = get_cutoff_date()
     
     params = {
@@ -59,29 +60,46 @@ def fetch_transactions(limit: int = 100) -> list[dict]:
         "sort": "month desc",
         "limit": limit,
     }
+    
+    print(f"  Fetching from API with limit={limit}...")
     resp = requests.get(API_BASE, params=params, timeout=30)
     resp.raise_for_status()
     data = resp.json()
     if not data.get("success"):
         raise RuntimeError(f"API returned failure: {data}")
     
+    records = data["result"]["records"]
+    print(f"  API returned {len(records)} raw records")
+    
     # Filter transactions:
     # 1. Only from the last N months
     # 2. Only leases that commenced from MIN_LEASE_YEAR onwards
-    records = data["result"]["records"]
-    filtered = [
-        r for r in records 
-        if r.get("month", "") >= cutoff_month
-        and int(r.get("lease_commence_date", "0")) >= MIN_LEASE_YEAR
-    ]
+    filtered = []
+    for r in records:
+        month = r.get("month", "")
+        lease_year = r.get("lease_commence_date", "0")
+        
+        # Check month filter
+        if month < cutoff_month:
+            continue
+        
+        # Check lease year filter
+        try:
+            if int(lease_year) < MIN_LEASE_YEAR:
+                continue
+        except (ValueError, TypeError):
+            continue
+        
+        filtered.append(r)
+    
+    print(f"  After filtering (month >= {cutoff_month}, lease >= {MIN_LEASE_YEAR}): {len(filtered)} records")
     
     # Sort by:
-    # 1. Month descending (latest month first)
-    # 2. Within same month, sort by _id descending (most recent first)
-    # _id is typically the record ID that indicates insertion order
+    # 1. Month descending (latest month first: 2026-05 → 2026-04)
+    # 2. Within same month, sort by resale_price descending (highest price first)
     filtered = sorted(
         filtered, 
-        key=lambda x: (x.get("month", ""), x.get("_id", 0)),
+        key=lambda x: (x.get("month", ""), float(x.get("resale_price", 0))),
         reverse=True
     )
     
@@ -133,10 +151,10 @@ def build_email_body(new_txns: list[dict]) -> tuple[str, str, str]:
         "─" * 70,
     ]
     
-    # Sort by month descending, then by _id descending (latest first)
+    # Sort by month descending, then by price descending (latest first)
     sorted_txns = sorted(
         new_txns,
-        key=lambda x: (x.get("month", ""), x.get("_id", 0)),
+        key=lambda x: (x.get("month", ""), float(x.get("resale_price", 0))),
         reverse=True
     )
     
@@ -152,7 +170,7 @@ def build_email_body(new_txns: list[dict]) -> tuple[str, str, str]:
         ]
     plain = "\n".join(lines)
 
-    # HTML - sorted latest first (month first, then _id)
+    # HTML - sorted latest first (month first, then price descending)
     rows = ""
     for t in sorted_txns:
         rows += f"""
@@ -235,7 +253,7 @@ def main() -> None:
         print(f"❌ Failed to fetch data: {e}", file=sys.stderr)
         sys.exit(1)
 
-    print(f"  Fetched : {len(txns)} records from API (after filtering)")
+    print(f"  Final   : {len(txns)} records to process")
 
     state    = load_state()
     seen_ids = set(state.get("seen_ids", []))
