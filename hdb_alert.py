@@ -76,12 +76,12 @@ def fetch_transactions(limit: int = 100) -> list[dict]:
     ]
     
     # Sort by:
-    # 1. Month descending (latest month first)
-    # 2. Within same month, sort by _id descending (most recent first)
-    # _id is typically the record ID that indicates insertion order
+    # 1. Month descending (latest month first: 2026-05 → 2026-04)
+    # 2. Within same month, sort by resale_price descending (highest price first = most recent/valuable)
+    # This ensures newest/most relevant transactions appear at top
     filtered = sorted(
         filtered, 
-        key=lambda x: (x.get("month", ""), x.get("_id", 0)),
+        key=lambda x: (x.get("month", ""), float(x.get("resale_price", 0))),
         reverse=True
     )
     
@@ -133,10 +133,10 @@ def build_email_body(new_txns: list[dict]) -> tuple[str, str, str]:
         "─" * 70,
     ]
     
-    # Sort by month descending, then by _id descending (latest first)
+    # Sort by month descending, then by price descending (latest first)
     sorted_txns = sorted(
         new_txns,
-        key=lambda x: (x.get("month", ""), x.get("_id", 0)),
+        key=lambda x: (x.get("month", ""), float(x.get("resale_price", 0))),
         reverse=True
     )
     
@@ -152,7 +152,7 @@ def build_email_body(new_txns: list[dict]) -> tuple[str, str, str]:
         ]
     plain = "\n".join(lines)
 
-    # HTML - sorted latest first (month first, then _id)
+    # HTML - sorted latest first (month first, then price descending)
     rows = ""
     for t in sorted_txns:
         rows += f"""
