@@ -42,14 +42,14 @@ jobs:
           restore-keys: |
             hdb-state-${{ runner.os }}-
 
-      # ── 6. Copy state file to working directory ───────────────────────
+      # ── 6. Copy state file into root working directory ────────────────
       - name: Setup state file
         run: |
           if [ -f "${{ runner.temp }}/hdb-state/last_seen.json" ]; then
             cp "${{ runner.temp }}/hdb-state/last_seen.json" ./last_seen.json
           fi
 
-      # ── 7. Run the alert script ───────────────────────────────────────
+      # ── 7. FIXED: Points accurately to hdb_alert_IMPROVED_SORT.py ─────
       - name: Run HDB alert check
         env:
           HDB_STREET_NAME:            ${{ vars.HDB_STREET_NAME }}
@@ -59,7 +59,7 @@ jobs:
           GMAIL_ADDRESS:              ${{ secrets.GMAIL_ADDRESS }}
           GMAIL_APP_PASSWORD:         ${{ secrets.GMAIL_APP_PASSWORD }}
           ALERT_TO_EMAIL:             ${{ secrets.ALERT_TO_EMAIL }}
-        run: python hdb_alert.py
+        run: python hdb_alert_IMPROVED_SORT.py
 
       # ── 8. Copy state file back to cache location ─────────────────────
       - name: Save state file
@@ -73,7 +73,7 @@ jobs:
       # ── 9. Save updated state so the next run knows what it already saw ─
       - name: Save updated state cache
         if: always()
-        uses: actions/cache@v4
+        uses: actions/cache/save@v4
         with:
           path: ${{ runner.temp }}/hdb-state/last_seen.json
-          key: hdb-state-${{ runner.os }}-${{ github.repository }}-${{ github.run_id }}
+          key: hdb-state-${{ runner.os }}-${{ github.repository }}
