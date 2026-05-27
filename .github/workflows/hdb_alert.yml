@@ -2,8 +2,11 @@ name: HDB Resale Alert
 
 on:
   schedule:
-    # Runs every day at 9:00 AM Singapore time (SGT = UTC+8 → 01:00 UTC)
+    # Runs every 12 hours: 9:00 AM and 9:00 PM Singapore time (SGT = UTC+8)
+    # 9:00 AM SGT  = 01:00 UTC
+    # 9:00 PM SGT  = 13:00 UTC
     - cron: "0 1 * * *"
+    - cron: "0 13 * * *"
 
   # Allow manual trigger from the GitHub Actions tab
   workflow_dispatch:
@@ -13,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ── 1. Checkout your repo ──────────────────────────────────────────
+      # ── 1. Checkout your repo ─────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
@@ -29,51 +32,36 @@ jobs:
       - name: Install dependencies
         run: pip install requests
 
-      # ── 4. Create state directory ──────────────────────────────────────
-      - name: Create state directory
-        run: mkdir -p ${{ runner.temp }}/hdb-state
-
-      # ── 5. Restore cached state (tracks which IDs we've already seen) ─
+      # ── 4. Restore state cache ────────────────────────────────────────
+      # Restores last_seen.json from the previous run.
+      # Uses restore-keys as fallback so it always gets the most recent cache.
       - name: Restore state cache
         uses: actions/cache@v4
         with:
-          path: ${{ runner.temp }}/hdb-state/last_seen.json
-          key: hdb-state-${{ runner.os }}-${{ github.repository }}
+          path: last_seen.json
+          key: hdb-state-${{ runner.os }}-${{ github.run_id }}
           restore-keys: |
             hdb-state-${{ runner.os }}-
 
-      # ── 6. Copy state file to working directory ───────────────────────
-      - name: Setup state file
-        run: |
-          if [ -f "${{ runner.temp }}/hdb-state/last_seen.json" ]; then
-            cp "${{ runner.temp }}/hdb-state/last_seen.json" ./last_seen.json
-          fi
-
-      # ── 7. Run the alert script ───────────────────────────────────────
+      # ── 5. Run the alert script ───────────────────────────────────────
       - name: Run HDB alert check
         env:
           HDB_STREET_NAME:            ${{ vars.HDB_STREET_NAME }}
           HDB_FLAT_TYPE:              ${{ vars.HDB_FLAT_TYPE }}
           HDB_TOWN:                   ${{ vars.HDB_TOWN }}
           RESALE_REGISTRATION_MONTHS: ${{ vars.RESALE_REGISTRATION_MONTHS }}
+          MIN_LEASE_YEAR:             ${{ vars.MIN_LEASE_YEAR }}
           GMAIL_ADDRESS:              ${{ secrets.GMAIL_ADDRESS }}
           GMAIL_APP_PASSWORD:         ${{ secrets.GMAIL_APP_PASSWORD }}
           ALERT_TO_EMAIL:             ${{ secrets.ALERT_TO_EMAIL }}
         run: python hdb_alert.py
 
-      # ── 8. Copy state file back to cache location ─────────────────────
-      - name: Save state file
-        if: always()
-        run: |
-          mkdir -p "${{ runner.temp }}/hdb-state"
-          if [ -f "./last_seen.json" ]; then
-            cp "./last_seen.json" "${{ runner.temp }}/hdb-state/last_seen.json"
-          fi
-
-      # ── 9. Save updated state so the next run knows what it already saw ─
-      - name: Save updated state cache
+      # ── 6. Save updated state cache ───────────────────────────────────
+      # Saves last_seen.json so the NEXT run knows what it already saw.
+      # "if: always()" ensures this runs even if the script fails.
+      - name: Save state cache
         if: always()
         uses: actions/cache@v4
         with:
-          path: ${{ runner.temp }}/hdb-state/last_seen.json
-          key: hdb-state-${{ runner.os }}-${{ github.repository }}-${{ github.run_id }}
+          path: last_seen.json
+          key: hdb-state-${{ runner.os }}-${{ github.run_id }}
